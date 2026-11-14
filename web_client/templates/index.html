@@ -1,0 +1,275 @@
+<!DOCTYPE html>
+<html lang="{{ selected_language }}">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Study Space</title>
+    <link rel="stylesheet" href="{{ url_for('static', filename='style.css') }}">
+</head>
+<body>
+<main class="workspace" id="workspace">
+    <!-- Left / Centered Main Problem Column -->
+    <div class="problem-column">
+        <!-- Top Settings Bar: Language & int32 Complexity -->
+        <form class="controls-bar" method="GET" action="{{ url_for('index') }}">
+            <div class="control-group">
+                <label for="language">Language</label>
+                <select id="language" name="lang" onchange="this.form.submit()">
+                    {% for code, name in languages %}
+                    <option value="{{ code }}" {% if code == selected_language %}selected{% endif %}>
+                        {{ name }}
+                    </option>
+                    {% endfor %}
+                </select>
+            </div>
+
+            <div class="control-group">
+                <label for="complexity">Complexity (int32)</label>
+                <input
+                        type="number"
+                        id="complexity"
+                        name="complexity"
+                        value="{{ complexity }}"
+                        min="-2147483648"
+                        max="2147483647"
+                        step="1"
+                        onchange="this.form.submit()"
+                >
+            </div>
+        </form>
+
+        <!-- Problem Image -->
+        <section class="card problem-card" aria-label="Problem">
+            <div class="image-frame">
+                <img
+                        src="{{ problem.image_url }}"
+                        alt="Problem {{ problem.id }}"
+                        loading="eager"
+                >
+            </div>
+        </section>
+
+        <!-- Answer Selection (A to E) -->
+        <form class="card answer-card" method="POST" action="{{ url_for('submit_answer') }}">
+            <input type="hidden" name="problem_id" value="{{ problem.id }}">
+            <input type="hidden" name="lang" value="{{ selected_language }}">
+            <input type="hidden" name="complexity" value="{{ complexity }}">
+
+            <fieldset class="options-group">
+                <legend class="section-label">Choose an option</legend>
+                {% for option in ['A', 'B', 'C', 'D', 'E'] %}
+                <label class="option-tile">
+                    <input
+                            type="radio"
+                            name="choice"
+                            value="{{ option }}"
+                            {% if selected_choice == option %}checked{% endif %}
+                            required
+                    >
+                    <span class="option-letter">{{ option }}</span>
+                    <span class="option-text">Option {{ option }}</span>
+                </label>
+                {% endfor %}
+            </fieldset>
+
+            {% if feedback %}
+            <p class="feedback {{ 'feedback-ok' if feedback.correct else 'feedback-muted' }}">
+                {{ feedback.message }}
+            </p>
+            {% endif %}
+
+            <div class="actions-row">
+                <button
+                        type="button"
+                        id="toggle-help-btn"
+                        class="btn btn-secondary"
+                        aria-expanded="false"
+                        aria-controls="help-drawer"
+                >
+                    Ask for help
+                </button>
+                <button type="submit" class="btn btn-primary">Submit Answer</button>
+            </div>
+        </form>
+    </div>
+
+    <!-- Right-Side Sliding Help Drawer -->
+    <aside class="help-drawer" id="help-drawer" aria-label="Progressive Help" aria-live="polite">
+        <div class="help-drawer-inner card">
+            <div class="help-top">
+                <div class="help-title-group">
+                    <span class="section-label">Guided Help</span>
+                    <div class="step-dots" id="step-dots" aria-label="Help progress">
+                        <span class="dot" data-step="1" title="Easier problem"></span>
+                        <span class="dot" data-step="2" title="Topic"></span>
+                        <span class="dot" data-step="3" title="Hint"></span>
+                        <span class="dot" data-step="4" title="Solution"></span>
+                    </div>
+                </div>
+
+                <button
+                        type="button"
+                        id="close-help-btn"
+                        class="btn-icon"
+                        title="Hide help panel"
+                        aria-label="Hide help panel"
+                >
+                    ×
+                </button>
+            </div>
+
+            <button
+                    type="button"
+                    id="next-help-btn"
+                    class="btn btn-secondary btn-full"
+                    data-problem-id="{{ problem.id }}"
+                    data-lang="{{ selected_language }}"
+            >
+                Ask for more help
+            </button>
+
+            <!-- Confirmation Prompt for Level 4 (Solution) -->
+            <div id="confirm-box" class="confirm-box hidden" role="alert">
+                <p>Reveal the complete solution? You won't be able to undo this step.</p>
+                <div class="confirm-actions">
+                    <button type="button" id="confirm-yes" class="btn btn-primary btn-small">Yes, show solution</button>
+                    <button type="button" id="confirm-no" class="btn btn-ghost btn-small">Keep trying</button>
+                </div>
+            </div>
+
+            <!-- Progressive Hints Log -->
+            <div id="help-log" class="help-log"></div>
+        </div>
+    </aside>
+</main>
+
+<script>
+    (function () {
+        const workspace = document.getElementById("workspace");
+        const toggleHelpBtn = document.getElementById("toggle-help-btn");
+        const closeHelpBtn = document.getElementById("close-help-btn");
+        const nextHelpBtn = document.getElementById("next-help-btn");
+        const helpLog = document.getElementById("help-log");
+        const confirmBox = document.getElementById("confirm-box");
+        const confirmYes = document.getElementById("confirm-yes");
+        const confirmNo = document.getElementById("confirm-no");
+        const dots = document.querySelectorAll("#step-dots .dot");
+
+        const LEVEL_LABELS = {
+            1: "1 · Similar Easier Problem",
+            2: "2 · Problem Topic",
+            3: "3 · Hint",
+            4: "4 · Solution"
+        };
+
+        let currentLevel = 0;
+        let isLoading = false;
+        let isDrawerOpen = false;
+
+        function syncToggleLabel() {
+            toggleHelpBtn.setAttribute("aria-expanded", String(isDrawerOpen));
+            if (currentLevel === 0) {
+                toggleHelpBtn.textContent = "Ask for help";
+            } else {
+                toggleHelpBtn.textContent = isDrawerOpen
+                    ? "Hide help"
+                    : `Show help (${currentLevel}/4)`;
+            }
+        }
+
+        function setDrawerOpen(open) {
+            isDrawerOpen = open;
+            workspace.classList.toggle("help-open", open);
+            syncToggleLabel();
+        }
+
+        function updateDots(level) {
+            dots.forEach((dot) => {
+                const step = Number(dot.dataset.step);
+                dot.classList.toggle("active", step <= level);
+            });
+        }
+
+        async function fetchHelpLevel(level) {
+            if (isLoading) return;
+            isLoading = true;
+            nextHelpBtn.disabled = true;
+            const previousText = nextHelpBtn.textContent;
+            nextHelpBtn.textContent = "Thinking...";
+
+            try {
+                const params = new URLSearchParams({
+                    problem_id: nextHelpBtn.dataset.problemId,
+                    lang: nextHelpBtn.dataset.lang,
+                    level: level
+                });
+
+                const response = await fetch(`/help?${params.toString()}`);
+                if (!response.ok) throw new Error("Request failed");
+                const data = await response.json();
+
+                const entry = document.createElement("div");
+                entry.className = "help-entry";
+                entry.innerHTML = `
+            <span class="help-tag">${LEVEL_LABELS[level]}</span>
+            <p>${data.content}</p>
+          `;
+                helpLog.appendChild(entry);
+
+                currentLevel = level;
+                updateDots(currentLevel);
+                syncToggleLabel();
+
+                if (currentLevel >= 4) {
+                    nextHelpBtn.textContent = "All help revealed";
+                    nextHelpBtn.disabled = true;
+                } else {
+                    nextHelpBtn.textContent = "Ask for more help";
+                    nextHelpBtn.disabled = false;
+                }
+            } catch (err) {
+                nextHelpBtn.textContent = previousText;
+                nextHelpBtn.disabled = false;
+            } finally {
+                isLoading = false;
+            }
+        }
+
+        function requestNextLevel() {
+            if (currentLevel >= 4 || isLoading) return;
+            const nextLevel = currentLevel + 1;
+
+            if (nextLevel === 4) {
+                confirmBox.classList.remove("hidden");
+                nextHelpBtn.disabled = true;
+            } else {
+                fetchHelpLevel(nextLevel);
+            }
+        }
+
+        // Main button: opens drawer & loads Level 1 on first click; toggles drawer thereafter
+        toggleHelpBtn.addEventListener("click", () => {
+            if (currentLevel === 0) {
+                setDrawerOpen(true);
+                fetchHelpLevel(1);
+            } else {
+                setDrawerOpen(!isDrawerOpen);
+            }
+        });
+
+        closeHelpBtn.addEventListener("click", () => setDrawerOpen(false));
+        nextHelpBtn.addEventListener("click", requestNextLevel);
+
+        confirmYes.addEventListener("click", () => {
+            confirmBox.classList.add("hidden");
+            fetchHelpLevel(4);
+        });
+
+        confirmNo.addEventListener("click", () => {
+            confirmBox.classList.add("hidden");
+            nextHelpBtn.disabled = false;
+        });
+    })();
+</script>
+</body>
+</html>
